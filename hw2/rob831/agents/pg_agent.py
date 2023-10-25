@@ -1,9 +1,11 @@
+import ipdb
 import numpy as np
+import torch
 
 from rob831.agents.base_agent import BaseAgent
 from rob831.policies.MLP_policy import MLPPolicyPG
 from rob831.infrastructure.replay_buffer import ReplayBuffer
-
+from rob831.infrastructure import pytorch_util as ptu
 from rob831.infrastructure.utils import normalize, unnormalize
 
 class PGAgent(BaseAgent):
@@ -45,9 +47,12 @@ class PGAgent(BaseAgent):
 
         # HINT1: use helper functions to compute qvals and advantages
         # HINT2: look at the MLPPolicyPG class for how to update the policy
+         
             # and obtain a train_log
-
-        raise NotImplementedError
+        #ipdb.set_trace()
+        q_vals = self.calculate_q_vals(rewards_list)
+        advantages = self.estimate_advantage(observations, rewards_list, q_vals, terminals)
+        train_log = self.actor.update(observations, actions, advantages, q_values=q_vals)
 
         return train_log
 
@@ -72,15 +77,15 @@ class PGAgent(BaseAgent):
         # Estimate Q^{pi}(s_t, a_t) by the total discounted reward summed over entire trajectory
         # HINT3: q_values should be a 1D numpy array where the indices correspond to the same
         # ordering as observations, actions, etc.
-
         if not self.reward_to_go:
             #use the whole traj for each timestep
-            raise NotImplementedError
+            #ipdb.set_trace()
+            q_values = np.concatenate([self._discounted_return(traj_rewards) for traj_rewards in rewards_list])
 
         # Case 2: reward-to-go PG
         # Estimate Q^{pi}(s_t, a_t) by the discounted sum of rewards starting from t
         else:
-            raise NotImplementedError
+            q_values = np.concatenate([self._discounted_cumsum(traj_rewards) for traj_rewards in rewards_list])
 
         return q_values  # return an array
 
@@ -101,13 +106,14 @@ class PGAgent(BaseAgent):
             ## TODO: values were trained with standardized q_values, so ensure
                 ## that the predictions have the same mean and standard deviation as
                 ## the current batch of q_values
-
-            raise NotImplementedError
-            values = TODO
+            #ipdb.set_trace()
+            qval_torch = ptu.from_numpy(q_values)
+            values = values_normalized * qval_torch.std() + qval_torch.mean()
 
             if self.gae_lambda is not None:
                 ## append a dummy T+1 value for simpler recursive calculation
-                values = np.append(values, [0])
+                #ipdb.set_trace()
+                values = torch.cat((values, torch.tensor([0], device=ptu.device)))
 
                 ## combine rews_list into a single array
                 rewards = np.concatenate(rewards_list)
@@ -115,8 +121,9 @@ class PGAgent(BaseAgent):
                 ## create empty numpy array to populate with GAE advantage
                 ## estimates, with dummy T+1 value for simpler recursive calculation
                 batch_size = obs.shape[0]
-                advantages = np.zeros(batch_size + 1)
-
+                advantages = torch.zeros(batch_size + 1, device=ptu.device)
+                advantages[-1] = rewards[-1] - values[-1]
+                #ipdb.set_trace()
                 for i in reversed(range(batch_size)):
                     ## TODO: recursively compute advantage estimates starting from
                         ## timestep T.
@@ -125,7 +132,12 @@ class PGAgent(BaseAgent):
                         ## 0 otherwise.
                     ## HINT 2: self.gae_lambda is the lambda value in the
                         ## GAE formula
-                    raise NotImplementedError
+
+                    # only include next step if not terminal.
+                    delta_i = rewards[i] + self.gamma * values[i+1] * (1-terminals[i]) - values[i]
+                    # Only include prior step if not terminal
+                    advantages[i] = delta_i + self.gamma * self.gae_lambda * advantages[i+1] * (1-terminals[i])
+                    
 
                 # remove dummy advantage
                 advantages = advantages[:-1]
@@ -133,19 +145,19 @@ class PGAgent(BaseAgent):
             else:
                 ## TODO: compute advantage estimates using q_values, and values as baselines
                 # raise NotImplementedError
-                advantages = TODO
+                advantages = qval_torch - values
 
         # Else, just set the advantage to [Q]
         else:
-            advantages = q_values.copy()
+            #ipdb.set_trace()
+            qval_torch = ptu.from_numpy(q_values)
+            advantages = qval_torch.clone().detach()
 
         # Normalize the resulting advantages
         if self.standardize_advantages:
             ## TODO: standardize the advantages to have a mean of zero
             ## and a standard deviation of one
-
-            raise NotImplementedError
-            advantages = TODO
+            advantages = (advantages - advantages.mean()) / advantages.std()
 
         return advantages
 
@@ -172,7 +184,13 @@ class PGAgent(BaseAgent):
         """
 
         # TODO: create discounted_returns
-        raise NotImplementedError
+        discounts = np.ones_like(rewards) * self.gamma
+        discounts[0] = 1
+        discounts = np.cumprod(discounts)
+        discounted_returns = np.cumsum(rewards * discounts)
+        final_returns = discounted_returns[-1]
+        # We want the return to be the same; use the reward for the whole episode.
+        discounted_returns = np.ones_like(rewards) * final_returns
 
         return discounted_returns
 
@@ -186,6 +204,8 @@ class PGAgent(BaseAgent):
         # TODO: create `discounted_cumsums`
         # HINT: it is possible to write a vectorized solution, but a solution
             # using a for loop is also fine
-        raise NotImplementedError
-
+        discounted_cumsums = np.zeros_like(rewards)
+        for t in range(len(rewards)-2, -1, -1):
+            discounted_cumsums[t] = rewards[t] + self.gamma * discounted_cumsums[t+1]
+        discounted_cumsums[-1] = rewards[-1]
         return discounted_cumsums
